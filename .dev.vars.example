@@ -1,0 +1,6 @@
+# Local development environment variables
+# Copy this file to .dev.vars and fill in your values.
+# .dev.vars is gitignored — never commit real secrets.
+
+SCHOLAR_URL=https://scholar.google.com/citations?user=YOUR_USER_ID&hl=en
+API_KEY_HASH=ENTER_YOUR_HASH_KEY

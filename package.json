@@ -1,0 +1,14 @@
+{
+  "name": "scholar-stats",
+  "version": "1.0.0",
+  "description": "Daily Google Scholar citation scraper hosted on Cloudflare Workers",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.71.0"
+  }
+}
