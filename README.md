@@ -1,132 +1,111 @@
 # Google Scholar Stats — Cloudflare Worker
 
-A lightweight scraper that fetches your Google Scholar citation statistics
-(citations, h-index, i10-index, publications, citation history) once a day
-and exposes them via a simple JSON API. Runs entirely on Cloudflare's **free tier**.
+Scrapes your Google Scholar profile once a day and serves the data via a simple JSON API. Runs entirely on Cloudflare's **free tier**.
 
 ---
 
-## Architecture
+## How it works
 
-```
-Cloudflare Cron (daily 06:00 UTC)
-        │
-        ▼
-  Worker: scrape Scholar page
-        │
-        ▼
-  KV Storage  ◄──── GET /stats ◄──── your website / app
+```mermaid
+flowchart TD
+    A[⏰ Cron — 06:00 UTC daily] -->|scrape| B[Google Scholar]
+    B -->|HTML| C[Cloudflare Worker]
+    C -->|parse + save| D[(KV Storage)]
+    E[Your Website] -->|GET /stats| D
+    F[curl / server] -->|GET /stats| D
 ```
 
-| Resource         | Free tier limit | This project uses |
-| ---------------- | --------------- | ----------------- |
-| Worker requests  | 100 000 / day   | ~1–10 / day       |
-| KV reads         | 100 000 / day   | ~1–10 / day       |
-| KV writes        | 1 000 / day     | 1 / day           |
-| Cron invocations | unlimited       | 1 / day           |
+### Free tier usage
+
+| Resource         | Limit         | This project |
+| ---------------- | ------------- | ------------ |
+| Worker requests  | 100,000 / day | ~1-10 / day  |
+| KV reads         | 100,000 / day | ~1-10 / day  |
+| KV writes        | 1,000 / day   | 1 / day      |
+| Cron invocations | unlimited     | 1 / day      |
 
 ---
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) >= 18
-- A [Cloudflare account](https://dash.cloudflare.com/sign-up) (free)
-- Your **public** Google Scholar profile URL:
-  `https://scholar.google.com/citations?user=XXXXXXXXXXXX&hl=en`
+- Node.js >= 18
+- A free [Cloudflare account](https://dash.cloudflare.com/sign-up)
+- Your **public** Google Scholar profile URL
 
 ---
 
 ## Local Development
 
-### 1. Install dependencies
+**1. Install dependencies**
 
 ```bash
 pnpm install
 ```
 
-### 2. Create `.dev.vars`
+**2. Create `.dev.vars`**
 
 ```
 SCHOLAR_URL=https://scholar.google.com/citations?user=YOUR_ID&hl=en
 API_KEY_HASH=your_hash_here
 ```
 
-> Leave `API_KEY_HASH` empty to skip auth during local dev.
+> Leave `API_KEY_HASH` empty to skip auth locally.
 
-### 3. Start the dev server
+**3. Run**
 
 ```bash
 pnpm dev
 ```
 
-### 4. Test with Thunder Client or curl
+**4. Test**
 
 ```bash
-# Health check (no auth needed)
 curl http://localhost:8787/
-
-# Trigger a scrape
-curl -X POST http://localhost:8787/refresh \
-     -H "x-api-key: YOUR_RAW_KEY"
-
-# Fetch stats
-curl http://localhost:8787/stats \
-     -H "x-api-key: YOUR_RAW_KEY"
+curl http://localhost:8787/stats -H "x-api-key: YOUR_RAW_KEY"
+curl -X POST http://localhost:8787/refresh -H "x-api-key: YOUR_RAW_KEY"
 ```
 
 ---
 
 ## Authentication
 
-One key protects both `/stats` and `/refresh`. It uses **SHA-256 hashing** —
-the raw key travels in the request, only the hash is stored on the server.
+One key protects both `/stats` and `/refresh`. Only the **hash** is stored — never the raw key.
 
-### Generate your key and hash
+**Generate your key + hash / use your preferred tool to create them:**
 
 ```bash
 node -e "
   const crypto = require('crypto');
   const key  = crypto.randomBytes(32).toString('hex');
   const hash = crypto.createHash('sha256').update(key).digest('hex');
-  console.log('RAW KEY (use in requests):', key);
-  console.log('HASH (store in Cloudflare):', hash);
+  console.log('RAW KEY:', key);
+  console.log('HASH:   ', hash);
 "
 ```
 
-| Value   | Where it goes                        |
-| ------- | ------------------------------------ |
-| Raw key | Your requests via `x-api-key` header |
-| Hash    | Cloudflare secret `API_KEY_HASH`     |
-
-### How it works
-
-```
-Request  →  x-api-key: raw_key
-                    ↓
-           Worker hashes raw_key
-                    ↓
-           Compare to API_KEY_HASH
-                    ↓
-           match ✓ → 200   no match ✗ → 403
-```
-
----
-
 ## Deployment
 
-### 1. Login to Cloudflare
+```mermaid
+flowchart LR
+    A[1. wrangler login] --> B[2. Create KV namespace]
+    B --> C[3. Set secrets]
+    C --> D[4. pnpm deploy]
+    D --> E[5. Seed cache]
+```
+
+**1. Login**
 
 ```bash
 npx wrangler login
 ```
 
-### 2. Create the KV namespace
+**2. Create KV namespace**
 
 ```bash
 npx wrangler kv namespace create SCHOLAR_KV
 ```
 
-Copy the printed `id` into `wrangler.toml`:
+Paste the printed `id` into `wrangler.toml`:
 
 ```toml
 [[kv_namespaces]]
@@ -134,45 +113,24 @@ binding = "SCHOLAR_KV"
 id      = "paste-id-here"
 ```
 
-### 3. Set your secrets
+**3. Set secrets**
 
 ```bash
 npx wrangler secret put SCHOLAR_URL
-# paste: https://scholar.google.com/citations?user=YOUR_ID&hl=en
-
 npx wrangler secret put API_KEY_HASH
-# paste: your hash value
-
-npx wrangler secret put ALLOWED_ORIGINS
-# paste: https://yourwebsite.com,https://www.yourwebsite.com
+npx wrangler secret put ALLOWED_ORIGINS   # e.g. https://yoursite.com
 ```
 
-### 4. Deploy
+**4. Deploy**
 
 ```bash
 pnpm deploy
 ```
 
-The CLI prints your live Worker URL:
-
-```
-https://scholar-stats.YOUR-SUBDOMAIN.workers.dev
-```
-
-### 5. Seed the cache
-
-The cron runs daily at 06:00 UTC — trigger it manually right after deploy
-so data is available immediately:
+**5. Seed the cache** (so data is available immediately without waiting for the cron)
 
 ```bash
 curl -X POST https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/refresh \
-     -H "x-api-key: YOUR_RAW_KEY"
-```
-
-### 6. Verify
-
-```bash
-curl https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats \
      -H "x-api-key: YOUR_RAW_KEY"
 ```
 
@@ -180,7 +138,7 @@ curl https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats \
 
 ## API
 
-All responses follow this envelope:
+All responses use this shape:
 
 ```json
 {
@@ -191,32 +149,15 @@ All responses follow this envelope:
 }
 ```
 
----
+### Endpoints
 
-### `GET /`
+| Method | Path       | Auth        | Description              |
+| ------ | ---------- | ----------- | ------------------------ |
+| GET    | `/`        | None        | Health check             |
+| GET    | `/stats`   | `x-api-key` | Returns cached stats     |
+| POST   | `/refresh` | `x-api-key` | Triggers a manual scrape |
 
-Health check. No auth required.
-
-```json
-{
-  "status": "OK",
-  "statusCode": 200,
-  "message": "Google Scholar Stats API",
-  "endpoints": { ... },
-  "cache": {
-    "hasData": true,
-    "lastScraped": "2024-04-15T06:01:23.456Z"
-  }
-}
-```
-
----
-
-### `GET /stats`
-
-Returns the latest cached scholar stats.
-
-**Header required:** `x-api-key: YOUR_RAW_KEY`
+### `GET /stats` — example response
 
 ```json
 {
@@ -224,26 +165,24 @@ Returns the latest cached scholar stats.
   "statusCode": 200,
   "message": "Success",
   "data": {
-    "name": "author name",
-    "affiliation": "affiliation name",
-    "interests": ["Cyber Security", "Blockchain"],
-    "citations": { "all": 113, "recent": 112 },
-    "hIndex": { "all": 3, "recent": 3 },
-    "i10Index": { "all": 3, "recent": 3 },
+    "name": "Jane Smith",
+    "affiliation": "University of Example",
+    "interests": ["Machine Learning", "Computer Vision", "NLP"],
+    "citations": { "all": 520, "recent": 210 },
+    "hIndex": { "all": 12, "recent": 8 },
+    "i10Index": { "all": 18, "recent": 10 },
     "citationHistory": [
-      { "year": 2020, "citations": 1 },
-      { "year": 2021, "citations": 2 },
-      { "year": 2022, "citations": 11 },
-      { "year": 2023, "citations": 31 }
+      { "year": 2022, "citations": 98 },
+      { "year": 2023, "citations": 142 }
     ],
     "publications": [
       {
-        "title": "Research title...",
-        "authors": "Author1, ...",
-        "journal": "IEEE",
-        "citedBy": 80,
-        "year": 2024,
-        "link": "https://scholar.google.com/..."
+        "title": "A survey on deep learning methods for...",
+        "authors": "J Smith, A Johnson, ...",
+        "journal": "IEEE Trans. Neural Netw. 14 (2)",
+        "citedBy": 210,
+        "year": 2022,
+        "link": "https://scholar.google.com/citations?..."
       }
     ],
     "scrapedAt": "2024-04-15T06:01:23.456Z"
@@ -253,61 +192,37 @@ Returns the latest cached scholar stats.
 
 ---
 
-### `POST /refresh`
+## CORS — calling from a browser
 
-Triggers an immediate scrape and updates the cache.
+Set `ALLOWED_ORIGINS` to your site's domain. The browser automatically sends the `Origin` header — no extra code needed.
 
-**Header required:** `x-api-key: YOUR_RAW_KEY`
-
-```bash
-curl -X POST https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/refresh \
-     -H "x-api-key: YOUR_RAW_KEY"
+```mermaid
+flowchart LR
+    A[Browser request] -->|Origin: yoursite.com| B{Worker}
+    B -->|origin in allowlist?| C{Check}
+    C -->|yes| D[200 + CORS headers]
+    C -->|no| E[403 Forbidden]
+    F[curl / server] -->|no Origin header| B
+    B -->|falls through to x-api-key check| G[API key auth]
 ```
-
-```json
-{
-  "status": "OK",
-  "statusCode": 200,
-  "message": "Refreshed successfully",
-  "data": { ... }
-}
-```
-
----
-
-## Calling from your website
 
 ```js
-fetch("https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats", {
-  headers: { "x-api-key": process.env.SCHOLAR_API_KEY },
-})
+// No extra headers needed in your frontend — browser sends Origin automatically
+fetch("https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats")
   .then((r) => r.json())
-  .then(({ data }) => {
-    console.log(`Citations: ${data.citations.all}`);
-    console.log(`h-index: ${data.hIndex.all}`);
-  });
+  .then(({ data }) => console.log(data.citations.all));
 ```
-
-> Set `ALLOWED_ORIGINS` in Cloudflare secrets to restrict which domains
-> can call the API from a browser.
-
----
-
-## Cron Schedule
-
-Runs at **06:00 UTC every day** (`0 6 * * *`).
-Edit the `crons` field in `wrangler.toml` to change the schedule.
 
 ---
 
 ## Troubleshooting
 
-| Symptom                       | Likely cause                                  | Fix                                 |
-| ----------------------------- | --------------------------------------------- | ----------------------------------- |
-| `/stats` returns 404          | Cache is empty, cron has not run yet          | Call `POST /refresh` manually       |
-| 403 on `/stats` or `/refresh` | Sending hash instead of raw key               | Send the **raw key** in `x-api-key` |
-| "Could not parse stats"       | Scholar returned a CAPTCHA or rate-limit page | Retry later                         |
-| Stats are stale               | Cron failed                                   | Check logs: `pnpm tail`             |
+| Symptom               | Cause                           | Fix                                 |
+| --------------------- | ------------------------------- | ----------------------------------- |
+| `/stats` returns 404  | Cache empty, cron not run yet   | Call `POST /refresh` manually       |
+| 403 on any endpoint   | Sending hash instead of raw key | Send the **raw key** in `x-api-key` |
+| 500 / Scholar blocked | Scholar rate-limiting the IP    | Wait 10-15 min and retry            |
+| Stats are stale       | Cron failed silently            | Check logs: `pnpm tail`             |
 
 ---
 
