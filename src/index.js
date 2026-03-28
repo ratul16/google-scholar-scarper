@@ -77,12 +77,12 @@ function parseScholarHTML(html, profileUrl) {
   const affMatch = html.match(/class="gsc_prf_ila"[^>]*>([^<]+)<\/a>/);
   if (affMatch) result.affiliation = decodeHtmlEntities(affMatch[1].trim());
 
-  // Homepage
-  const homepageMatch = html.match(/rel="nofollow" href="([^"]+)"[^>]*>Homepage</i);
+  // Homepage — inside id="gsc_prf_ivh", href comes before rel="nofollow"
+  const homepageMatch = html.match(/id="gsc_prf_ivh"[\s\S]*?href="([^"]+)"[^>]*rel="nofollow"/i);
   if (homepageMatch) result.homepage = homepageMatch[1];
 
-  // Avatar
-  const avatarMatch = html.match(/id="gsc_prf_pup-img"[^>]*src="([^"]+)"/);
+  // Avatar — the img uses srcset not src, grab the first URL (128w)
+  const avatarMatch = html.match(/id="gsc_prf_pup-img"[^>]*srcset="([^"\s]+)/);
   if (avatarMatch) result.avatarUrl = avatarMatch[1];
 
   // Research interests
