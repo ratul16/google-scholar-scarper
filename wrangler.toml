@@ -9,7 +9,7 @@ compatibility_date = "2024-04-01"
 binding = "SCHOLAR_KV"
 id = "REPLACE_WITH_YOUR_KV_ID"
 
-# ── Cron trigger: once per day at 06:00 UTC ──────────────────────────────────
+# ── Cron trigger: run Monday and Thursday at 06:00 UTC ──────────────────────────────────
 [triggers]
-crons = ["0 6 * * *"]
+crons = ["0 6 * * 1,4"]
 

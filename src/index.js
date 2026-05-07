@@ -7,35 +7,55 @@ const KV_KEY = "scholar_stats";
 
 // ── Scraper ────────────────────────────────────────────────────────────────
 
+const SCHOLAR_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept":
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Cache-Control": "no-cache",
+  "Pragma": "no-cache",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function scrapeScholarStats(scholarUrl) {
   const url = new URL(scholarUrl);
   url.searchParams.set("pagesize", "100");
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Accept-Encoding": "gzip, deflate, br",
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache",
-      "Sec-Fetch-Dest": "document",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "none",
-      "Sec-Fetch-User": "?1",
-      "Upgrade-Insecure-Requests": "1",
-    },
-  });
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 3000; // 3 seconds between retries
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch Scholar page: HTTP ${response.status}`);
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url.toString(), { headers: SCHOLAR_HEADERS });
+
+      if (response.ok) {
+        const html = await response.text();
+        return parseScholarHTML(html, scholarUrl);
+      }
+
+      lastError = new Error(`HTTP ${response.status}`);
+      console.warn(`Attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${response.status}`);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Attempt ${attempt}/${MAX_RETRIES} error:`, err.message);
+    }
+
+    if (attempt < MAX_RETRIES) {
+      await sleep(RETRY_DELAY_MS);
+    }
   }
 
-  const html = await response.text();
-  return parseScholarHTML(html, scholarUrl);
+  throw new Error(`Failed to fetch Scholar page after ${MAX_RETRIES} attempts: ${lastError.message}`);
 }
 
 function decodeHtmlEntities(str) {
@@ -191,20 +211,6 @@ function checkOrigin(request, env) {
   return allowed.includes(origin.toLowerCase()) ? origin : false;
 }
 
-/**
- * Validates x-api-key using SHA-256 hash comparison.
- * Store the HASH in Cloudflare secret API_KEY_HASH.
- * Send the RAW KEY in the x-api-key header.
- *
- * Generate key + hash:
- *   node -e "
- *     const c = require('crypto');
- *     const key = c.randomBytes(32).toString('hex');
- *     const hash = c.createHash('sha256').update(key).digest('hex');
- *     console.log('RAW KEY:', key);
- *     console.log('HASH:', hash);
- *   "
- */
 async function checkApiKey(request, env) {
   // Legacy fallback: plain text comparison if only API_KEY is set
   if (env.API_KEY && !env.API_KEY_HASH) {
@@ -225,11 +231,6 @@ async function checkApiKey(request, env) {
   return hashHex === env.API_KEY_HASH;
 }
 
-/**
- * Central auth gate.
- * Browser requests (Origin header present) → CORS origin allowlist.
- * Non-browser requests (curl, server-side) → API key check.
- */
 async function authorize(request, env) {
   const origin = request.headers.get("Origin");
 
