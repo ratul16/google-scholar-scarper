@@ -1,14 +1,62 @@
 /**
  * Google Scholar Stats Scraper
- * Cloudflare Worker with KV storage
- *
- * Scraping is handled externally (GitHub Actions) to avoid Cloudflare datacenter
- * IP blocks from Google. The Worker only stores and serves data via /ingest + /stats.
+ * Cloudflare Worker with KV storage and Cron scheduling
  */
 
 const KV_KEY = "scholar_stats";
 
-// ── HTML Parsing ───────────────────────────────────────────────────────────
+// ── Scraper ────────────────────────────────────────────────────────────────
+
+const SCHOLAR_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept":
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Cache-Control": "no-cache",
+  "Pragma": "no-cache",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+};
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function scrapeScholarStats(scholarUrl) {
+  const url = new URL(scholarUrl);
+  url.searchParams.set("pagesize", "100");
+
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 3000; // 3 seconds between retries
+
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url.toString(), { headers: SCHOLAR_HEADERS });
+
+      if (response.ok) {
+        const html = await response.text();
+        return parseScholarHTML(html, scholarUrl);
+      }
+
+      lastError = new Error(`HTTP ${response.status}`);
+      console.warn(`Attempt ${attempt}/${MAX_RETRIES} failed: HTTP ${response.status}`);
+    } catch (err) {
+      lastError = err;
+      console.warn(`Attempt ${attempt}/${MAX_RETRIES} error:`, err.message);
+    }
+
+    if (attempt < MAX_RETRIES) {
+      await sleep(RETRY_DELAY_MS);
+    }
+  }
+
+  throw new Error(`Failed to fetch Scholar page after ${MAX_RETRIES} attempts: ${lastError.message}`);
+}
 
 function decodeHtmlEntities(str) {
   return str
@@ -49,11 +97,11 @@ function parseScholarHTML(html, profileUrl) {
   const affMatch = html.match(/class="gsc_prf_ila"[^>]*>([^<]+)<\/a>/);
   if (affMatch) result.affiliation = decodeHtmlEntities(affMatch[1].trim());
 
-  // Homepage
+  // Homepage — inside id="gsc_prf_ivh", href comes before rel="nofollow"
   const homepageMatch = html.match(/id="gsc_prf_ivh"[\s\S]*?href="([^"]+)"[^>]*rel="nofollow"/i);
   if (homepageMatch) result.homepage = homepageMatch[1];
 
-  // Avatar
+  // Avatar — the img uses srcset not src, grab the first URL (128w)
   const avatarMatch = html.match(/id="gsc_prf_pup-img"[^>]*srcset="([^"\s]+)/);
   if (avatarMatch) result.avatarUrl = avatarMatch[1];
 
@@ -81,7 +129,9 @@ function parseScholarHTML(html, profileUrl) {
     );
   }
 
-  // Citation history
+  // Citation history (bar chart)
+  // Years:  <span class="gsc_g_t" style="...">2023</span>
+  // Values: <span class="gsc_g_al">31</span>
   const histYears = [...html.matchAll(/class="gsc_g_t"[^>]*>(\d{4})<\/span>/g)].map((m) =>
     parseInt(m[1], 10),
   );
@@ -93,31 +143,34 @@ function parseScholarHTML(html, profileUrl) {
     citations: histValues[i] ?? 0,
   }));
 
-  // Publications
+  // Publications — scoped inside <tbody id="gsc_a_b">
   const tbodyMatch = html.match(/id="gsc_a_b"[^>]*>([\s\S]*?)<\/tbody>/);
   const tbody = tbodyMatch ? tbodyMatch[1] : html;
   const pubRows = [...tbody.matchAll(/<tr[^>]*class="gsc_a_tr"[^>]*>([\s\S]*?)<\/tr>/g)];
 
   for (const [, row] of pubRows) {
+    // Title + link: <a href="..." class="gsc_a_at">Title</a>
     const titleMatch = row.match(/href="([^"]+)"[^>]*class="gsc_a_at"[^>]*>([\s\S]*?)<\/a>/);
     const title = titleMatch ? decodeHtmlEntities(stripTags(titleMatch[2])) : null;
-    const link = titleMatch
-      ? "https://scholar.google.com" + decodeHtmlEntities(titleMatch[1])
-      : null;
+    const link = titleMatch ? "https://scholar.google.com" + decodeHtmlEntities(titleMatch[1]) : null;
 
+    // Authors & journal in <div class="gs_gray">
     const grayDivs = [...row.matchAll(/class="gs_gray">([\s\S]*?)<\/div>/g)].map((m) =>
       decodeHtmlEntities(stripTags(m[1])),
     );
     const authors = grayDivs[0] ?? null;
+    // Strip nested <span class="gs_oph">, 2022</span> from journal
     const journal = grayDivs[1]
       ? decodeHtmlEntities(
         stripTags(grayDivs[1].replace(/<span[^>]*>[\s\S]*?<\/span>/g, "")).trim(),
       )
       : null;
 
+    // Cited-by: <a ... class="gsc_a_ac gs_ibl">80</a>
     const citedMatch = row.match(/class="gsc_a_ac[^"]*"[^>]*>(\d+)<\/a>/);
     const citedBy = citedMatch ? parseInt(citedMatch[1], 10) : 0;
 
+    // Year: <span class="gsc_a_h gsc_a_hc gs_ibl">2022</span>
     const yearMatch = row.match(/class="gsc_a_h gsc_a_hc[^"]*">(\d{4})<\/span>/);
     const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
 
@@ -126,12 +179,13 @@ function parseScholarHTML(html, profileUrl) {
     }
   }
 
+  // Sort by cited-by descending (matches Scholar default)
   result.publications.sort((a, b) => b.citedBy - a.citedBy);
 
   return result;
 }
 
-// ── KV helpers ─────────────────────────────────────────────────────────────
+// KV helpers
 
 async function loadStats(kv) {
   const raw = await kv.get(KV_KEY);
@@ -142,7 +196,7 @@ async function saveStats(kv, data) {
   await kv.put(KV_KEY, JSON.stringify(data));
 }
 
-// ── Security helpers ───────────────────────────────────────────────────────
+// Security helpers
 
 function getAllowedOrigins(env) {
   if (!env.ALLOWED_ORIGINS) return [];
@@ -158,9 +212,11 @@ function checkOrigin(request, env) {
 }
 
 async function checkApiKey(request, env) {
+  // Legacy fallback: plain text comparison if only API_KEY is set
   if (env.API_KEY && !env.API_KEY_HASH) {
     return request.headers.get("x-api-key") === env.API_KEY;
   }
+  // Neither configured — open access (useful for local dev)
   if (!env.API_KEY_HASH) return true;
 
   const incoming = request.headers.get("x-api-key");
@@ -192,7 +248,7 @@ async function authorize(request, env) {
   }
 }
 
-// ── Response helpers ───────────────────────────────────────────────────────
+// Response helpers
 
 const STATUS_TEXT = {
   200: "OK",
@@ -220,7 +276,7 @@ function jsonResponse(payload, statusCode = 200, allowedOrigin = null) {
   });
 }
 
-// ── Request handler ────────────────────────────────────────────────────────
+// Request handler 
 
 async function handleRequest(request, env) {
   const url = new URL(request.url);
@@ -249,12 +305,12 @@ async function handleRequest(request, env) {
     return jsonResponse({
       message: "Google Scholar Stats API",
       description:
-        "Receives scraped Google Scholar HTML from GitHub Actions and serves parsed stats. Use GET /stats to retrieve data.",
-      version: "2.0.0",
+        "Scrapes and caches Google Scholar profile stats once daily. Use GET /stats to retrieve data.",
+      version: "1.0.0",
       endpoints: {
         "GET /": "Health check (this response)",
         "GET /stats": "Returns cached scholar stats — requires Origin allowlist or x-api-key header",
-        "POST /ingest": "Accepts raw HTML from GitHub Actions scraper — requires x-api-key header",
+        "POST /refresh": "Triggers an immediate scrape — requires x-api-key header",
       },
       cache: {
         hasData: stats !== null,
@@ -263,7 +319,7 @@ async function handleRequest(request, env) {
     }, 200);
   }
 
-  // GET /stats -- return cached data
+  // GET /stats -- return cached data (requires auth)
   if (url.pathname === "/stats" && request.method === "GET") {
     const auth = await authorize(request, env);
     if (!auth.ok) {
@@ -273,7 +329,7 @@ async function handleRequest(request, env) {
     const stats = await loadStats(env.SCHOLAR_KV);
     if (!stats) {
       return jsonResponse(
-        { message: "No data yet. Trigger the GitHub Actions workflow to seed the cache." },
+        { message: "No data yet. Trigger /refresh or wait for the daily cron." },
         404,
         auth.origin,
       );
@@ -281,30 +337,21 @@ async function handleRequest(request, env) {
     return jsonResponse({ message: "Success", data: stats }, 200, auth.origin);
   }
 
-  // POST /ingest -- receives raw HTML from GitHub Actions, parses and saves
-  if (url.pathname === "/ingest" && request.method === "POST") {
+  // POST /refresh -- manual scrape trigger
+  if (url.pathname === "/refresh" && request.method === "POST") {
     const auth = await authorize(request, env);
     if (!auth.ok) {
       return jsonResponse({ message: auth.error }, 401);
     }
 
     try {
-      const body = await request.json();
-      const { html, profileUrl } = body;
-
-      if (!html) {
-        return jsonResponse({ message: "Missing required field: html" }, 400);
+      const scholarUrl = env.SCHOLAR_URL;
+      if (!scholarUrl) {
+        return jsonResponse({ message: "SCHOLAR_URL environment variable not set." }, 500);
       }
-
-      const stats = parseScholarHTML(html, profileUrl ?? env.SCHOLAR_URL ?? "unknown");
+      const stats = await scrapeScholarStats(scholarUrl);
       await saveStats(env.SCHOLAR_KV, stats);
-
-      return jsonResponse({
-        message: "Data successfully ingested",
-        name: stats.name,
-        publications: stats.publications.length,
-        citations: stats.citations.all,
-      }, 200);
+      return jsonResponse({ message: "Data Successfully refreshed" }, 200);
     } catch (err) {
       return jsonResponse({ message: err.message }, 500);
     }
@@ -313,6 +360,22 @@ async function handleRequest(request, env) {
   return jsonResponse({ message: "Not Found" }, 404);
 }
 
+// Scheduled handler (Cron)
+
+async function handleScheduled(env) {
+  const scholarUrl = env.SCHOLAR_URL;
+  if (!scholarUrl) {
+    console.error("SCHOLAR_URL not set — skipping scheduled scrape");
+    return;
+  }
+  console.log("Cron: scraping", scholarUrl);
+  const stats = await scrapeScholarStats(scholarUrl);
+  await saveStats(env.SCHOLAR_KV, stats);
+  console.log("Cron: saved stats for", stats.name);
+}
+
+
 export default {
   fetch: handleRequest,
+  scheduled: (_event, env, _ctx) => handleScheduled(env),
 };

@@ -1,6 +1,6 @@
 # Google Scholar Stats — Cloudflare Worker
 
-Scrapes your Google Scholar profile once a day and serves the data via a simple JSON API. Runs entirely on Cloudflare's **free tier**.
+Scrapes your Google Scholar profile on a schedule and serves the data via a simple JSON API. Runs entirely on Cloudflare's **free tier**.
 
 ---
 
@@ -8,21 +8,35 @@ Scrapes your Google Scholar profile once a day and serves the data via a simple 
 
 ```mermaid
 flowchart TD
-    A[⏰ Cron — 06:00 UTC daily] -->|scrape| B[Google Scholar]
-    B -->|HTML| C[Cloudflare Worker]
+    A[⏰ GitHub Actions Cron — Mon & Thu 06:00 UTC] -->|fetch HTML| B[Google Scholar]
+    B -->|raw HTML| A
+    A -->|POST /ingest with HTML| C[Cloudflare Worker]
     C -->|parse + save| D[(KV Storage)]
-    E[Your Website] -->|GET /stats| D
-    F[curl / server] -->|GET /stats| D
+    E[Your Website] -->|GET /stats| C
+    F[curl / server] -->|GET /stats| C
 ```
+
+### Why GitHub Actions instead of a Worker cron?
+
+Google Scholar blocks requests originating from **Cloudflare datacenter IPs** — even with browser-like headers and retries, the Worker would reliably get blocked or served a CAPTCHA page. Cloudflare's IP ranges are well-known to Google and are filtered aggressively.
+
+GitHub Actions runners use **Azure-hosted IPs** that Google does not block at low request frequency. Moving the scrape there means the Worker never makes outbound requests to Google at all — it only receives, parses, and stores the HTML sent by the Action.
+
+|                           | Worker cron            | GitHub Actions                      |
+| ------------------------- | ---------------------- | ----------------------------------- |
+| IP reputation with Google | ❌ Datacenter, blocked | ✅ Not targeted at low frequency    |
+| Free tier                 | ✅                     | ✅                                  |
+| Scrape reliability        | ❌ Unreliable          | ✅ Reliable                         |
+| Infrastructure changes    | None                   | Adds `scripts/scrape.js` + workflow |
 
 ### Free tier usage
 
-| Resource         | Limit         | This project |
-| ---------------- | ------------- | ------------ |
-| Worker requests  | 100,000 / day | ~1-10 / day  |
-| KV reads         | 100,000 / day | ~1-10 / day  |
-| KV writes        | 1,000 / day   | 1 / day      |
-| Cron invocations | unlimited     | 1 / day      |
+| Resource        | Limit         | This project          |
+| --------------- | ------------- | --------------------- |
+| Worker requests | 100,000 / day | ~1–10 / day           |
+| KV reads        | 100,000 / day | ~1–10 / day           |
+| KV writes       | 1,000 / day   | 2 / week              |
+| GitHub Actions  | 2,000 min/mo  | ~2 min per run × 8/mo |
 
 ---
 
@@ -30,6 +44,7 @@ flowchart TD
 
 - Node.js >= 18
 - A free [Cloudflare account](https://dash.cloudflare.com/sign-up)
+- A GitHub account (for Actions)
 - Your **public** Google Scholar profile URL
 
 ---
@@ -45,8 +60,7 @@ pnpm install
 **2. Create `.dev.vars`**
 
 ```
-SCHOLAR_URL=https://scholar.google.com/citations?user=YOUR_ID&hl=en
-API_KEY_HASH=your_hash_here
+ALLOWED_ORIGINS=http://localhost:3000
 ```
 
 > Leave `API_KEY_HASH` empty to skip auth locally.
@@ -57,40 +71,44 @@ API_KEY_HASH=your_hash_here
 pnpm dev
 ```
 
-**4. Test**
+**4. Test ingest locally** by running the scrape script against the local Worker:
 
 ```bash
-curl http://localhost:8787/
-curl http://localhost:8787/stats -H "x-api-key: YOUR_RAW_KEY"
-curl -X POST http://localhost:8787/refresh -H "x-api-key: YOUR_RAW_KEY"
+SCHOLAR_URL="https://scholar.google.com/citations?user=YOUR_ID&hl=en" \
+WORKER_URL="http://localhost:8787" \
+API_KEY="" \
+node scripts/scrape.js
 ```
 
 ---
 
 ## Authentication
 
-One key protects both `/stats` and `/refresh`. Only the **hash** is stored — never the raw key.
+One key protects both `/stats` and `/ingest`. Only the **hash** is stored — never the raw key.
 
-**Generate your key + hash / use your preferred tool to create them:**
+**Generate your key + hash:**
 
 ```bash
 node -e "
   const crypto = require('crypto');
   const key  = crypto.randomBytes(32).toString('hex');
   const hash = crypto.createHash('sha256').update(key).digest('hex');
-  console.log('RAW KEY:', key);
-  console.log('HASH:   ', hash);
+  console.log('RAW KEY (use in GitHub secrets + curl):', key);
+  console.log('HASH    (use in wrangler secret):', hash);
 "
 ```
+
+---
 
 ## Deployment
 
 ```mermaid
 flowchart LR
     A[1. wrangler login] --> B[2. Create KV namespace]
-    B --> C[3. Set secrets]
+    B --> C[3. Set Worker secrets]
     C --> D[4. pnpm deploy]
-    D --> E[5. Seed cache]
+    D --> E[5. Add GitHub secrets]
+    E --> F[6. Seed cache]
 ```
 
 **1. Login**
@@ -113,10 +131,9 @@ binding = "SCHOLAR_KV"
 id      = "paste-id-here"
 ```
 
-**3. Set secrets**
+**3. Set Worker secrets**
 
 ```bash
-npx wrangler secret put SCHOLAR_URL
 npx wrangler secret put API_KEY_HASH
 npx wrangler secret put ALLOWED_ORIGINS   # e.g. https://yoursite.com
 ```
@@ -127,11 +144,32 @@ npx wrangler secret put ALLOWED_ORIGINS   # e.g. https://yoursite.com
 pnpm deploy
 ```
 
-**5. Seed the cache** (so data is available immediately without waiting for the cron)
+**5. Add GitHub Actions secrets**
+
+Go to your repo → **Settings → Secrets and variables → Actions** and add:
+
+| Secret        | Value                                              |
+| ------------- | -------------------------------------------------- |
+| `SCHOLAR_URL` | Your full Scholar profile URL                      |
+| `WORKER_URL`  | `https://scholar-stats.YOUR-SUBDOMAIN.workers.dev` |
+| `API_KEY`     | The **raw** key (not the hash)                     |
+
+**6. Seed the cache** (first run — trigger manually so you don't wait for the next scheduled run)
+
+Go to **Actions → Scholar Scrape → Run workflow**, or run locally:
 
 ```bash
-curl -X POST https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/refresh \
-     -H "x-api-key: YOUR_RAW_KEY"
+SCHOLAR_URL="https://scholar.google.com/citations?user=YOUR_ID&hl=en" \
+WORKER_URL="https://scholar-stats.YOUR-SUBDOMAIN.workers.dev" \
+API_KEY="your_raw_key" \
+node scripts/scrape.js
+```
+
+**7. Verify**
+
+```bash
+curl https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats \
+  -H "x-api-key: YOUR_RAW_KEY"
 ```
 
 ---
@@ -151,11 +189,11 @@ All responses use this shape:
 
 ### Endpoints
 
-| Method | Path       | Auth        | Description              |
-| ------ | ---------- | ----------- | ------------------------ |
-| GET    | `/`        | None        | Health check             |
-| GET    | `/stats`   | `x-api-key` | Returns cached stats     |
-| POST   | `/refresh` | `x-api-key` | Triggers a manual scrape |
+| Method | Path      | Auth                            | Description                          |
+| ------ | --------- | ------------------------------- | ------------------------------------ |
+| GET    | `/`       | None                            | Health check                         |
+| GET    | `/stats`  | `x-api-key` or Origin allowlist | Returns cached stats                 |
+| POST   | `/ingest` | `x-api-key`                     | Accepts raw HTML from GitHub Actions |
 
 ### `GET /stats` — example response
 
@@ -217,12 +255,13 @@ fetch("https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats")
 
 ## Troubleshooting
 
-| Symptom               | Cause                           | Fix                                 |
-| --------------------- | ------------------------------- | ----------------------------------- |
-| `/stats` returns 404  | Cache empty, cron not run yet   | Call `POST /refresh` manually       |
-| 403 on any endpoint   | Sending hash instead of raw key | Send the **raw key** in `x-api-key` |
-| 500 / Scholar blocked | Scholar rate-limiting the IP    | Wait 10-15 min and retry            |
-| Stats are stale       | Cron failed silently            | Check logs: `pnpm tail`             |
+| Symptom                         | Cause                                     | Fix                                         |
+| ------------------------------- | ----------------------------------------- | ------------------------------------------- |
+| `/stats` returns 404            | Cache empty, Actions not run yet          | Trigger workflow manually from GitHub UI    |
+| Actions step fails with CAPTCHA | Scholar temporarily rate-limiting Actions | Re-run the workflow after a few minutes     |
+| 403 on `/ingest`                | Wrong API key in GitHub secret            | Re-check `API_KEY` secret matches raw key   |
+| 403 on `/stats` from browser    | Origin not in allowlist                   | Add your domain to `ALLOWED_ORIGINS` secret |
+| Stats are stale                 | Workflow failed silently                  | Check Actions tab in GitHub for failed runs |
 
 ---
 

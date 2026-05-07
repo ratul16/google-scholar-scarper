@@ -9,7 +9,8 @@ compatibility_date = "2024-04-01"
 binding = "SCHOLAR_KV"
 id = "REPLACE_WITH_YOUR_KV_ID"
 
-# ── Cron trigger: run Monday and Thursday at 06:00 UTC ──────────────────────────────────
-[triggers]
-crons = ["0 6 * * 1,4"]
+# ── No cron trigger ───────────────────────────────────────────────────────────
+# Scraping is handled by GitHub Actions (see .github/workflows/scrape.yml).
+# Cloudflare datacenter IPs are blocked by Google Scholar, so scraping from
+# a Worker cron is not reliable. GitHub Actions runner IPs are not blocked.
 

@@ -1,0 +1,26 @@
+name: Scholar Scrape
+
+on:
+  schedule:
+    - cron: "0 6 * * 1,4"  # Monday and Thursday at 06:00 UTC
+  workflow_dispatch:         # allows manual trigger from GitHub UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install node-fetch
+
+      - name: Scrape and ingest
+        run: node scripts/scrape.js
+        env:
+          SCHOLAR_URL: ${{ secrets.SCHOLAR_URL }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
