@@ -10,7 +10,17 @@ binding = "SCHOLAR_KV"
 id = "REPLACE_WITH_YOUR_KV_ID"
 
 # ── No cron trigger ───────────────────────────────────────────────────────────
-# Scraping is handled by GitHub Actions (see .github/workflows/scrape.yml).
-# Cloudflare datacenter IPs are blocked by Google Scholar, so scraping from
-# a Worker cron is not reliable. GitHub Actions runner IPs are not blocked.
+# The default setup (src/index.js) does NOT use a cron — scraping is done
+# locally via `pnpm scrape` because Cloudflare datacenter IPs are blocked
+# by Google Scholar.
+#
+# If you want the old fully-automated Worker cron approach (less reliable),
+# switch main to "src/old-index.js" and uncomment the cron below:
+#
+# main = "src/old-index.js"
+# [triggers]
+# crons = ["0 6 * * 1,4"]  # Monday and Thursday at 06:00 UTC
+#
+# You will also need to set the SCHOLAR_URL secret:
+# npx wrangler secret put SCHOLAR_URL
 

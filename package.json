@@ -2,12 +2,13 @@
   "name": "scholar-stats",
   "type": "module",
   "version": "1.0.0",
-  "description": "Daily Google Scholar citation scraper hosted on Cloudflare Workers",
+  "description": "Google Scholar stats scraper — Cloudflare Worker + local scrape script",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "scrape": "node --env-file=.env script/scrape.js"
   },
   "devDependencies": {
     "wrangler": "^4.87.0"

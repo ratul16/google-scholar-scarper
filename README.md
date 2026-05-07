@@ -1,6 +1,6 @@
 # Google Scholar Stats — Cloudflare Worker
 
-Scrapes your Google Scholar profile on a schedule and serves the data via a simple JSON API. Runs entirely on Cloudflare's **free tier**.
+Scrapes your Google Scholar profile and serves the data via a simple JSON API. Runs entirely on Cloudflare's **free tier**.
 
 ---
 
@@ -8,7 +8,7 @@ Scrapes your Google Scholar profile on a schedule and serves the data via a simp
 
 ```mermaid
 flowchart TD
-    A[⏰ GitHub Actions Cron — Mon & Thu 06:00 UTC] -->|fetch HTML| B[Google Scholar]
+    A[🖥️ Local Machine] -->|node script/scrape.js| B[Google Scholar]
     B -->|raw HTML| A
     A -->|POST /ingest with HTML| C[Cloudflare Worker]
     C -->|parse + save| D[(KV Storage)]
@@ -16,27 +16,43 @@ flowchart TD
     F[curl / server] -->|GET /stats| C
 ```
 
-### Why GitHub Actions instead of a Worker cron?
+### Why scrape locally instead of from the Worker?
 
-Google Scholar blocks requests originating from **Cloudflare datacenter IPs** — even with browser-like headers and retries, the Worker would reliably get blocked or served a CAPTCHA page. Cloudflare's IP ranges are well-known to Google and are filtered aggressively.
+Google Scholar blocks requests from **Cloudflare datacenter IPs** — even with browser-like headers and retries, the Worker gets blocked or served a CAPTCHA. GitHub Actions runners (Azure IPs) also get blocked intermittently.
 
-GitHub Actions runners use **Azure-hosted IPs** that Google does not block at low request frequency. Moving the scrape there means the Worker never makes outbound requests to Google at all — it only receives, parses, and stores the HTML sent by the Action.
+The most reliable approach is running the scrape script from your **local machine** and pushing the parsed data to the Worker's `/ingest` endpoint. Since Scholar data only changes every few days, running it manually or on a local cron is perfectly fine.
 
-|                           | Worker cron            | GitHub Actions                      |
-| ------------------------- | ---------------------- | ----------------------------------- |
-| IP reputation with Google | ❌ Datacenter, blocked | ✅ Not targeted at low frequency    |
-| Free tier                 | ✅                     | ✅                                  |
-| Scrape reliability        | ❌ Unreliable          | ✅ Reliable                         |
-| Infrastructure changes    | None                   | Adds `scripts/scrape.js` + workflow |
+|                           | Worker cron            | Local script                |
+| ------------------------- | ---------------------- | --------------------------- |
+| IP reputation with Google | ❌ Datacenter, blocked | ✅ Residential, not blocked |
+| Free tier                 | ✅                     | ✅                          |
+| Scrape reliability        | ❌ Unreliable          | ✅ Reliable                 |
+| Requires manual run       | No                     | Yes (or local cron)         |
+
+> **Looking for the old fully-automated version?** The original Worker cron approach (where the Worker fetches Scholar directly) is preserved in `src/old-index.js`. To use it, change `main = "src/old-index.js"` in `wrangler.toml` and uncomment the cron trigger. Note it is unreliable due to Cloudflare IPs being blocked by Google Scholar.
 
 ### Free tier usage
 
-| Resource        | Limit         | This project          |
-| --------------- | ------------- | --------------------- |
-| Worker requests | 100,000 / day | ~1–10 / day           |
-| KV reads        | 100,000 / day | ~1–10 / day           |
-| KV writes       | 1,000 / day   | 2 / week              |
-| GitHub Actions  | 2,000 min/mo  | ~2 min per run × 8/mo |
+| Resource        | Limit         | This project |
+| --------------- | ------------- | ------------ |
+| Worker requests | 100,000 / day | ~1–10 / day  |
+| KV reads        | 100,000 / day | ~1–10 / day  |
+| KV writes       | 1,000 / day   | ~2 / week    |
+
+---
+
+## Project structure
+
+```
+├── index.js               # Cloudflare Worker — /ingest + /stats endpoints
+├── script/
+│   └── scrape.js          # Local scrape script — fetches Scholar HTML, POSTs to Worker
+├── src/
+│   └── old-index.js       # Original version — Worker cron + direct scraping
+│                          # Kept for reference. Not used — Cloudflare IPs are blocked by Google.
+├── wrangler.toml
+└── package.json
+```
 
 ---
 
@@ -44,7 +60,6 @@ GitHub Actions runners use **Azure-hosted IPs** that Google does not block at lo
 
 - Node.js >= 18
 - A free [Cloudflare account](https://dash.cloudflare.com/sign-up)
-- A GitHub account (for Actions)
 - Your **public** Google Scholar profile URL
 
 ---
@@ -55,9 +70,10 @@ GitHub Actions runners use **Azure-hosted IPs** that Google does not block at lo
 
 ```bash
 pnpm install
+npm install node-fetch
 ```
 
-**2. Create `.dev.vars`**
+**2. Create `.dev.vars`** for the Worker:
 
 ```
 ALLOWED_ORIGINS=http://localhost:3000
@@ -65,26 +81,31 @@ ALLOWED_ORIGINS=http://localhost:3000
 
 > Leave `API_KEY_HASH` empty to skip auth locally.
 
-**3. Run**
+**3. Run the Worker locally**
 
 ```bash
 pnpm dev
 ```
 
-**4. Test ingest locally** by running the scrape script against the local Worker:
+**4. Create `.env`** for the scrape script:
+
+```
+SCHOLAR_URL=https://scholar.google.com/citations?user=YOUR_ID&hl=en
+WORKER_URL=http://localhost:8787
+API_KEY=
+```
+
+**5. Test ingest locally**
 
 ```bash
-SCHOLAR_URL="https://scholar.google.com/citations?user=YOUR_ID&hl=en" \
-WORKER_URL="http://localhost:8787" \
-API_KEY="" \
-node scripts/scrape.js
+node --env-file=.env script/scrape.js
 ```
 
 ---
 
 ## Authentication
 
-One key protects both `/stats` and `/ingest`. Only the **hash** is stored — never the raw key.
+One key protects both `/stats` and `/ingest`. Only the **hash** is stored in the Worker — never the raw key.
 
 **Generate your key + hash:**
 
@@ -93,7 +114,7 @@ node -e "
   const crypto = require('crypto');
   const key  = crypto.randomBytes(32).toString('hex');
   const hash = crypto.createHash('sha256').update(key).digest('hex');
-  console.log('RAW KEY (use in GitHub secrets + curl):', key);
+  console.log('RAW KEY (use in .env + curl):', key);
   console.log('HASH    (use in wrangler secret):', hash);
 "
 ```
@@ -105,10 +126,9 @@ node -e "
 ```mermaid
 flowchart LR
     A[1. wrangler login] --> B[2. Create KV namespace]
-    B --> C[3. Set Worker secrets]
+    B --> C[3. Set secrets]
     C --> D[4. pnpm deploy]
-    D --> E[5. Add GitHub secrets]
-    E --> F[6. Seed cache]
+    D --> E[5. Seed cache]
 ```
 
 **1. Login**
@@ -144,32 +164,44 @@ npx wrangler secret put ALLOWED_ORIGINS   # e.g. https://yoursite.com
 pnpm deploy
 ```
 
-**5. Add GitHub Actions secrets**
+**5. Seed the cache**
 
-Go to your repo → **Settings → Secrets and variables → Actions** and add:
+Create a `.env` file pointing at the deployed Worker:
 
-| Secret        | Value                                              |
-| ------------- | -------------------------------------------------- |
-| `SCHOLAR_URL` | Your full Scholar profile URL                      |
-| `WORKER_URL`  | `https://scholar-stats.YOUR-SUBDOMAIN.workers.dev` |
-| `API_KEY`     | The **raw** key (not the hash)                     |
-
-**6. Seed the cache** (first run — trigger manually so you don't wait for the next scheduled run)
-
-Go to **Actions → Scholar Scrape → Run workflow**, or run locally:
-
-```bash
-SCHOLAR_URL="https://scholar.google.com/citations?user=YOUR_ID&hl=en" \
-WORKER_URL="https://scholar-stats.YOUR-SUBDOMAIN.workers.dev" \
-API_KEY="your_raw_key" \
-node scripts/scrape.js
+```
+SCHOLAR_URL=https://scholar.google.com/citations?user=YOUR_ID&hl=en
+WORKER_URL=https://scholar-stats.YOUR-SUBDOMAIN.workers.dev
+API_KEY=your_raw_key
 ```
 
-**7. Verify**
+Then run the scrape script:
+
+```bash
+node --env-file=.env script/scrape.js
+```
+
+**6. Verify**
 
 ```bash
 curl https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats \
   -H "x-api-key: YOUR_RAW_KEY"
+```
+
+---
+
+## Refreshing data
+
+Whenever you want to update the cached stats, just run the scrape script again from your local machine:
+
+```bash
+node --env-file=.env script/scrape.js
+```
+
+Or set up a local cron (Mac/Linux) to automate it:
+
+```bash
+# crontab -e
+0 6 * * 1,4  cd /path/to/project && node --env-file=.env script/scrape.js
 ```
 
 ---
@@ -189,11 +221,11 @@ All responses use this shape:
 
 ### Endpoints
 
-| Method | Path      | Auth                            | Description                          |
-| ------ | --------- | ------------------------------- | ------------------------------------ |
-| GET    | `/`       | None                            | Health check                         |
-| GET    | `/stats`  | `x-api-key` or Origin allowlist | Returns cached stats                 |
-| POST   | `/ingest` | `x-api-key`                     | Accepts raw HTML from GitHub Actions |
+| Method | Path      | Auth                            | Description                         |
+| ------ | --------- | ------------------------------- | ----------------------------------- |
+| GET    | `/`       | None                            | Health check                        |
+| GET    | `/stats`  | `x-api-key` or Origin allowlist | Returns cached stats                |
+| POST   | `/ingest` | `x-api-key`                     | Accepts raw HTML from scrape script |
 
 ### `GET /stats` — example response
 
@@ -255,13 +287,13 @@ fetch("https://scholar-stats.YOUR-SUBDOMAIN.workers.dev/stats")
 
 ## Troubleshooting
 
-| Symptom                         | Cause                                     | Fix                                         |
-| ------------------------------- | ----------------------------------------- | ------------------------------------------- |
-| `/stats` returns 404            | Cache empty, Actions not run yet          | Trigger workflow manually from GitHub UI    |
-| Actions step fails with CAPTCHA | Scholar temporarily rate-limiting Actions | Re-run the workflow after a few minutes     |
-| 403 on `/ingest`                | Wrong API key in GitHub secret            | Re-check `API_KEY` secret matches raw key   |
-| 403 on `/stats` from browser    | Origin not in allowlist                   | Add your domain to `ALLOWED_ORIGINS` secret |
-| Stats are stale                 | Workflow failed silently                  | Check Actions tab in GitHub for failed runs |
+| Symptom                      | Cause                             | Fix                                         |
+| ---------------------------- | --------------------------------- | ------------------------------------------- |
+| `/stats` returns 404         | Cache empty, scrape not run yet   | Run `node --env-file=.env script/scrape.js` |
+| 403 from Scholar             | Scholar temporarily blocking IP   | Wait 15–30 min and retry                    |
+| 403 on `/ingest`             | Wrong API key in `.env`           | Check `API_KEY` matches your raw key        |
+| 403 on `/stats` from browser | Origin not in allowlist           | Add your domain to `ALLOWED_ORIGINS` secret |
+| Stats are stale              | Haven't run the scrape script yet | Run the scrape script manually              |
 
 ---
 
