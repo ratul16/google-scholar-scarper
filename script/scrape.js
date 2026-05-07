@@ -24,7 +24,7 @@ const SCHOLAR_HEADERS = {
 // add before the fetch loop
 const delay = Math.floor(Math.random() * 10000) + 5000;
 console.log(`Waiting ${delay}ms before fetching...`);
-await sleep(delay);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function scrape() {
     const url = new URL(SCHOLAR_URL);
