@@ -1,5 +1,6 @@
 {
   "name": "scholar-stats",
+  "type": "module",
   "version": "1.0.0",
   "description": "Daily Google Scholar citation scraper hosted on Cloudflare Workers",
   "private": true,
