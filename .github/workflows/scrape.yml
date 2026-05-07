@@ -19,7 +19,7 @@ jobs:
         run: npm install node-fetch
 
       - name: Scrape and ingest
-        run: node scripts/scrape.js
+        run: node script/scrape.js
         env:
           SCHOLAR_URL: ${{ secrets.SCHOLAR_URL }}
           WORKER_URL: ${{ secrets.WORKER_URL }}
